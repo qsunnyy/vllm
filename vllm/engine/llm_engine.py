@@ -238,19 +238,6 @@ class LLMEngine:
         if self.dp_enabled:
             self.dp_group = self.parallel_config.stateless_init_dp_group()
 
-        def new_has_unfinished_requests(self) -> bool:
-            has_unfinished = any(scheduler.has_unfinished_seqs()
-                                 for scheduler in self.scheduler)
-            if not self.dp_enabled:
-                return has_unfinished
-            return new_has_unfinished_requests_dp(self, has_unfinished)
-
-        def new_has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
-            aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
-                self.dp_group, has_unfinished)
-            if not has_unfinished and aggregated_has_unfinished:
-                self.should_execute_dummy_batch = True
-            return aggregated_has_unfinished
 
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
@@ -930,10 +917,24 @@ class LLMEngine:
         return sum(scheduler.get_num_unfinished_seq_groups()
                    for scheduler in self.scheduler)
 
+    # def has_unfinished_requests(self) -> bool:
+    #     """Returns True if there are unfinished requests."""
+    #     return any(scheduler.has_unfinished_seqs()
+    #                for scheduler in self.scheduler)
+
     def has_unfinished_requests(self) -> bool:
-        """Returns True if there are unfinished requests."""
-        return any(scheduler.has_unfinished_seqs()
-                   for scheduler in self.scheduler)
+        has_unfinished = any(scheduler.has_unfinished_seqs()
+                             for scheduler in self.scheduler)
+        if not self.dp_enabled:
+            return has_unfinished
+        return has_unfinished_requests_dp(self, has_unfinished)
+
+    def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
+        aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, has_unfinished)
+        if not has_unfinished and aggregated_has_unfinished:
+            self.should_execute_dummy_batch = True
+        return aggregated_has_unfinished
 
     def has_unfinished_requests_for_virtual_engine(
             self, virtual_engine: int) -> bool:
@@ -1331,6 +1332,12 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
+
+        if self.should_execute_dummy_batch:
+            self.should_execute_dummy_batch = False
+            self.model_executor.collective_rpc("execute_dummy_batch")
+            return []
+
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
